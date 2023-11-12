@@ -89,8 +89,24 @@ impl Timer {
     }
 }
 
+
+#[derive(Debug)]
+struct Chip8EmulatorOptions {
+    pub load_store_inc_i: bool,
+    // TODO other options
+}
+
+impl Chip8EmulatorOptions {
+    pub fn default() -> Chip8EmulatorOptions {
+        Chip8EmulatorOptions {
+            load_store_inc_i: false, // modern behaviour preferred
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Chip8Emulator {
+    pub options: Chip8EmulatorOptions,
     pub memory: [u8; 4096],
     pub registers: RegisterFile,
     pub display: Display,
@@ -131,6 +147,7 @@ fn hex_dump(bytes: &Vec<u8>) {
 impl Chip8Emulator {
     fn create() -> Chip8Emulator {
         let mut e = Chip8Emulator { 
+            options: Chip8EmulatorOptions::default(),
             memory: [0; 4096],
             registers: RegisterFile::create(),
             display: Display::create(),
@@ -141,6 +158,7 @@ impl Chip8Emulator {
             keyboard: 0,
             keyboard_last_kc: 0,
             keyboard_has_press: false,
+
         };
         
         // load font at 0x050 - 0x09f
@@ -211,7 +229,7 @@ impl Chip8Emulator {
         // Chip8 is big endian:
         let upper = self.memory[address] as u16;
         let lower = self.memory[address + 1] as u16;
-        println!("upper={:02x} lower={:02x}", upper, lower);
+        // println!("upper={:02x} lower={:02x}", upper, lower);
         let result = (upper << 8) | lower;
         result
     }
@@ -227,17 +245,28 @@ impl Chip8Emulator {
         self.rnd_byte_state as u8
     }
 
+    fn dump_regs(&self) {
+        print!("[pc={:x}, i={:04x}, ", self.registers.pc, self.registers.i);
+        for idx in 0..16 {
+            print!("v{:01x}={:02x}", idx, self.registers.v[idx as usize]);
+            if idx != 15 {
+                print!(", ");
+            }
+        }
+        println!("]");
+    }
+
     // One run loop step (fetch, decode, execute)
     pub fn step(&mut self) {
         // fetch
         println!("-----------------------------------");
-        println!("Fetch 0x{:x}", self.registers.pc);
         let instruction = self.read_u16(self.registers.pc as usize);
+        // println!("Fetch 0x{:x}", self.registers.pc);
+        println!("op={:04x}", instruction);
         self.registers.pc += 2;
 
         // decode
         let op_type = get_nibble(instruction, 0);
-        println!("op_type = {:02x}", op_type);
         match op_type {
             0x00 => {
                 // could also be 0x0NNN which we dont implement
@@ -252,8 +281,11 @@ impl Chip8Emulator {
             },
             0x01 => { // 1NNN
                 let addr = instruction & 0x0FFF;
-                self.registers.pc = addr;
                 println!("go to {:04x}", addr);
+                if self.registers.pc - 2 == addr {
+                    panic!("Detected loop");
+                }
+                self.registers.pc = addr;
             },
             0x02 => { // 2NNN
                 let addr = instruction & 0x0FFF;
@@ -265,7 +297,9 @@ impl Chip8Emulator {
                 let immediate = (instruction & 0x0FF) as u8;
                 let reg = get_nibble(instruction, 1);
                 let vx = self.registers.v[reg as usize];
+                println!("skip op if vx == nn");
                 if vx == immediate {
+                    println!("skipping");
                     self.registers.pc += 2;
                 }
             },
@@ -273,7 +307,9 @@ impl Chip8Emulator {
                 let immediate = (instruction & 0x0FF) as u8;
                 let reg = get_nibble(instruction, 1);
                 let vx = self.registers.v[reg as usize];
+                println!("skip op if vx != nn");
                 if vx != immediate {
+                    println!("skipping");
                     self.registers.pc += 2;
                 }
             },
@@ -282,8 +318,9 @@ impl Chip8Emulator {
                 let vx = self.registers.v[x as usize];
                 let y = get_nibble(instruction, 2);
                 let vy = self.registers.v[y as usize];
-
+                println!("skip op if vx == vy");
                 if vx == vy {
+                    println!("skipping");
                     self.registers.pc += 2;
                 }
             },
@@ -292,14 +329,14 @@ impl Chip8Emulator {
                 let reg = get_nibble(instruction, 1);
                 assert!(reg < 16u8);
                 self.registers.v[reg as usize] = value;
-                println!("v{:x} = {:02x}", reg, value);
+                println!("assign v{:x} = {:02x}", reg, value);
             },
             0x07 => { // 7XNN
                 let value = (instruction & 0x0FF) as u8;
                 let reg = get_nibble(instruction, 1);
                 assert!(reg < 16u8);
                 self.registers.v[reg as usize] = self.registers.v[reg as usize].wrapping_add(value);
-                println!("v{:x} += {:02x}", reg, value);
+                println!("assign v{:x} += {:02x}", reg, value);
             },
             0x08 => {
                 let op_variant = get_nibble(instruction, 3);
@@ -309,41 +346,53 @@ impl Chip8Emulator {
                 let vy = self.registers.v[y as usize];
                 match op_variant {
                     0 => { // 8XY0
+                        println!("set vx := vy");
                         self.registers.v[x as usize] = vy;
                     },
                     1 => { // 8XY1
+                        println!("set vx := vx | vy");
                         self.registers.v[x as usize] = vx | vy;
                     },
                     2 => { // 8XY2
+                        println!("set vx := vx & vy");
                         self.registers.v[x as usize] = vx & vy;
                     },
                     3 => { // 8XY3
+                        println!("set vx := vx ^ vy");
                         self.registers.v[x as usize] = vx ^ vy;
                     },
                     4 => { // 8XY4
+                        println!("set vx := vx + vy");
                         self.registers.v[x as usize] = vx.wrapping_add(vy);
                     },
                     5 => { // 8XY5
-                        // TODO: check if >= or >
-                        let carry_flag = if vx >= vy { 0u8  } else { 1u8 };
-                        self.registers.v[0xf] = carry_flag;
+                        let has_overflow = vy > vx;
+                        // if there is an overflow we will take the imaginary 1 out, if not we will
+                        // leave if in (set to 0 if overflow, else set to 1)
+                        self.registers.v[0xf] = !has_overflow as u8;
                         self.registers.v[x as usize] = vx.wrapping_sub(vy);
+                        println!("set vx := vx - vy");
                     },
                     6 => { // 8XY6 shift right
-                        let shifted_out_bit = 128u8 & vx;
-                        self.registers.v[0xf] = (shifted_out_bit != 0) as u8;
+                        let has_right_most_bit = 1u8 & vx > 0;
+                        self.registers.v[0xf] = has_right_most_bit as u8;
                         self.registers.v[x as usize] = vx.wrapping_shr(1);
+                        println!("shr vx");
+                        println!("vx has rmb = {}", has_right_most_bit);
                     },
                     7 => { // 8XY7
-                        // TODO: check if >= or >
-                        let carry_flag = if vy >= vx { 0u8  } else { 1u8 };
-                        self.registers.v[0xf] = carry_flag;
+                        let has_overflow = vx > vy;
+                        // same as for 8XY5, set vf=0 if of, else vf=1
+                        self.registers.v[0xf] = !has_overflow as u8;
                         self.registers.v[x as usize] = vy.wrapping_sub(vx);
+                        println!("set vx := vy - vx");
                     },
                     0xE => { // 8XYE shift left
-                        let shifted_out_bit = 1u8 & vx;
-                        self.registers.v[0xf] = (shifted_out_bit != 0) as u8;
+                        let has_left_most_bit = 128u8 & vx > 0;
+                        self.registers.v[0xf] = has_left_most_bit as u8;
                         self.registers.v[x as usize] = vx.wrapping_shl(1);
+                        println!("shl vx");
+                        println!("vx has lmb = {}", has_left_most_bit);
                     },
                     _ => panic!("Unhandled instruction {:x}", instruction)
 
@@ -356,6 +405,7 @@ impl Chip8Emulator {
                 let vy = self.registers.v[y as usize];
 
                 if vx != vy {
+                    println!("skipping");
                     self.registers.pc += 2;
                 }
             },
@@ -413,6 +463,7 @@ impl Chip8Emulator {
                 let switch = instruction & 0x00ff;
                 let x = get_nibble(instruction, 1);
                 let vx = self.registers.v[x as usize];
+                println!("vx={:x}", vx);
 
                 match switch {
                     0x07 => { // set vx = delay_timer
@@ -445,13 +496,31 @@ impl Chip8Emulator {
                         self.registers.i = char_addr;
                     },
                     0x33 => {
-                        // TODO
+                        let vi = self.registers.i as usize;
+                        let mut tmp = vx;
+                        for i in 0..3 {
+                            let digit = tmp % 10;
+                            self.memory[vi + (2 - i)] = digit;
+                            tmp = tmp / 10;
+                        }
                     },
-                    0x55 => {
-                        // TODO
+                    0x55 => { // FX55 store regs -> mem
+                        let mem_addr = self.registers.i as usize;
+                        for idx in 0..=x {
+                            self.memory[mem_addr + idx as usize] = self.registers.v[idx as usize];
+                        }
+                        if self.options.load_store_inc_i {
+                            self.registers.i += vx as u16 + 1;
+                        }
                     },
-                    0x65 => {
-                        // TODO
+                    0x65 => { // FX65 load mem -> regs
+                        let mem_addr = self.registers.i as usize;
+                        for idx in 0..=x {
+                            self.registers.v[idx as usize] = self.memory[mem_addr + idx as usize];
+                        }
+                        if self.options.load_store_inc_i {
+                            self.registers.i += vx as u16 + 1;
+                        }
                     },
                     _ => panic!("Unhandled instruction {:x}", instruction)
                 }
@@ -472,9 +541,11 @@ fn main() {
     // e.load_rom("./roms/BC_test.ch8".to_string()).unwrap();
 
     // instructions per second
+    // let ips = 700;
     let ips = 20;
     loop {
         e.step();
+        e.dump_regs();
         e.display.draw();
         thread::sleep(time::Duration::from_millis(1000 / ips));
     }
